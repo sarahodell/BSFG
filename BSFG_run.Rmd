@@ -1,0 +1,208 @@
+---
+title: "BSFG"
+author: "Sarah Odell"
+date: "3/13/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Running BSFG on Arabidopsis Root Data (data from Wolfgang Busch)
+For information on how the data was transformed, see RootDataTransformed.Rmd
+This should be run on farm. It takes about 9 hours to build the model and run MCMC using 50 factors and 70 iterations 
+```{r libraries, echo=FALSE, eval=FALSE}
+library("BSFG")
+library("reshape2")
+library("ggplot2")
+```
+
+
+Read in data
+```{r readdata, eval=FALSE}
+roots=read.table('~/Documents/PBGG/Rotations/Runcie/Archive/T_RootTraitMatrix.txt',sep='\t',header=TRUE)
+key=read.table('~/Documents/PBGG/Rotations/Runcie/Archive/T_RootTraitPlantKey.txt',sep='\t',header=TRUE)
+
+Y = roots[,-1]
+data = key
+dim(Y)
+```
+
+
+Set run parameters. Number of factors is initialized at 50
+```{r param, eval=FALSE}
+run_parameters = BSFG_control(
+  scale_Y = TRUE,
+  simulation = FALSE,
+  h2_divisions = 20,
+  h2_step_size = NULL,
+  burn = 00,
+  k_init = 50
+)
+```
+
+Set the prior hyperparameters of the BSFG model
+```{r prior, eval=FALSE}
+priors = BSFG_priors(
+  tot_Y_var = list(V = 0.5,   nu = 5),
+  tot_F_var = list(V = 18/20, nu = 20),
+  Lambda_prior=list(
+    sampler=sample_Lambda_prec_ARD,
+    Lambda_df=3,
+    delta_1   = list(shape = 2,  rate = 1),
+    delta_2   = list(shape = 3, rate = 1)),
+  B_prior=list(
+    sampler=sample_B_prec_ARD,
+    global=list(V=1,nu=3),
+    global_F=list(V=1,nu=3),
+    B_df=3,
+    B_F_df=2),
+  h2_priors_resids_fun = function(h2s,n) 1,
+  h2_priors_factors_fun = function(h2s,n) 1
+)
+```
+
+##Construct the model
+This takes about 20 minutes
+```{r model, eval=FALSE}
+BSFG_state = BSFG_init(Y,
+                       model=~1+(1|ACC_ID),
+                       data = data,
+                       run_parameters=run_parameters,
+                       priors=priors
+)
+```
+
+I would recommend saving the model to a file so that it can be easily loaded when examining
+posteriors later
+```{r savemodel, eval=FALSE}
+saveRDS(BSFG_state,file="BSFG_state.rds")
+```
+
+
+##MCMC run
+```{r mcmc, eval=FALSE}
+n_samples = 100;  # how many samples to collect at once?
+BSFG_state$run_parameters$simulation=F
+for(i  in 1:70) {
+  print(sprintf('Run %d',i))
+  BSFG_state = sample_BSFG(BSFG_state,n_samples,grainSize=1)  
+  # run MCMC chain n_samples iterations. grainSize is a parameter for
+  #parallelization (smaller = more parallelization)
+  # set of commands to run during burn-in period to help chain converge
+  if(BSFG_state$current_state$nrun < BSFG_state$run_parameters$burn || i < 50) {
+    BSFG_state = reorder_factors(BSFG_state) # Factor order doesn't "mix" well in the MCMC. We can help it by manually re-ordering from biggest to smallest
+    BSFG_state = clear_Posterior(BSFG_state)
+    BSFG_state$run_parameters$burn = max(BSFG_state$run_parameters$burn,BSFG_state$current_state$nrun+100) # if you made changes, set a new burn-in period
+    print(BSFG_state$run_parameters$burn)
+  }
+  BSFG_state = save_posterior_chunk(BSFG_state)  # save any accumulated posterior samples in the database to release memory
+  print(BSFG_state) # print status of current chain
+  plot(BSFG_state) # make some diagnostic plots. These are saved in a pdf booklet: diagnostic_plots.pdf
+}
+```
+
+
+
+##Analyzing the Posterior
+Reload the posterior samples that you need. (Reloading the full posterior requires more memory
+than we can use on farm)
+
+If you are starting a new session after running MCMC above, you can load everything 
+back starting in the director above the BSFG_run directory created by BSFG
+
+```{r posterior, eval=FALSE}
+BSFG_state=readRDS("BSFG_state.rds")
+BSFG_state$current_state=readRDS('BSFG_run/current_state.rds')
+BSFG_state$Posterior=readRDS('BSFG_run/Posterior/Posterior_base.rds')
+
+#This is too big 
+#BSFG_state$Posterior = reload_Posterior(BSFG_state)
+#Just load the things you need for now
+BSFG_state$Posterior$Lambda = load_posterior_param(BSFG_state,'Lambda')
+dim(Lambda)
+```
+
+
+```{r otherparams, eval=FALSE}
+BSFG_state$Posterior$F_h2=load_posterior_param(BSFG_state,'F_h2')
+BSFG_state$Posterior$resid_h2=load_posterior_param(BSFG_state,'resid_h2')
+BSFG_state$Posterior$tot_Eta_prec=load_posterior_param(BSFG_state,'tot_Eta_prec')
+BSFG_state$Posterior$B=load_posterior_param(BSFG_state,'B')
+BSFG_state$Posterior$B_F=load_posterior_param(BSFG_state,'B_F')
+BSFG_state$Posterior$U_F=load_posterior_param(BSFG_state,'U_F')
+
+Lambda_mean = get_posterior_mean(BSFG_state,Lambda)
+U_F_mean = get_posterior_mean(BSFG_state,U_F)
+```
+
+Then we can create plots to look at the posterior 
+```{r plots, eval=FALSE}
+# boxplots are good ways to visualize Posterior distributions on sets of related parameters
+boxplot(BSFG_state$Posterior$F_h2[,1,])
+
+# get posterior distribution on a function of parameters
+# This is how to calculate the G-matrix for random effect #1 (ie animal above.)
+G_samples = get_posterior_FUN(BSFG_state,Lambda %*% diag(F_h2[1,]) %*% t(Lambda) + resid_h2[1,]/tot_Eta_prec[1,])
+
+# get posterior mean of a parameter
+G = get_posterior_mean(G_samples)
+
+# get Highest Posterior Density intervals for paramters
+F_h2_HPD = get_posterior_HPDinterval(BSFG_state,F_h2)
+
+boxplot(BSFG_state$Posterior$B[,2,],outline=F);abline(h=0)
+boxplot(BSFG_state$Posterior$B_F[,2,],outline=F);abline(h=0)
+
+BSFG_state$Posterior$U_F = load_posterior_param(BSFG_state,'U_F')
+U_F = get_posterior_mean(BSFG_state,U_F)
+
+```
+
+We can also start to look at modules.
+The following code is from Caryn Johansen ()
+
+```{r g1, eval=FALSE}
+#load Posterior lambda array
+Lambda=BSFG_state$Posterior$Lambda
+
+#examine the factor loadings across all the Posterior
+g1 = Lambda[,1,] #for one trait
+g1_m = melt(g1)
+colnames(g1_m)=c("posterior","factor","loading")
+
+summary(g1_m)
+```
+
+Visualizing the first Posterior
+```{r f, eval=FALSE}
+f = Lambda[1,,]
+f=melt(f)
+colnames(f)=c("trait","factor","loading")
+f$factor=as.factor(f$factor)
+
+ggplot(f,aes(x=factor,y=loading)) + geom_boxplot()
+```
+
+Visualizing the last Posterior
+```{r last,eval=FALSE}
+n = dim(Lambda)[1]
+p=Lambda[n,,]
+p=melt(p)
+colnames(p)=c("trait","factor","loading")
+p$factor=as.factor(p$factor)
+
+ggplot(p,aes(x=factor,y=loading)) + geom_boxplot()
+```
+
+Looking at the modules for the last posterior.
+The cutoff for loading values is 0.2
+```{r modules,eval=FALSE}
+modules=p[p$loading >= 0.2]
+
+table(modules$factor)
+saveRDS(modules,file="modules.rds")
+```
+
+
