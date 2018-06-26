@@ -29,6 +29,9 @@ devtools::install_github("deruncie/SparseFactorMixedModel",subdir="BSFG",ref="on
 library("BSFG")
 ```
 
+raw_data Directory contains root data and plant_id codes for the untransformed and log-transformed (T_ superscript) data
+
+
 
 ## Acknowledgments
 
